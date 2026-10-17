@@ -1,0 +1,41 @@
+# --- secrets & local config (never commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- models, generated images, data (live outside the repo) ---
+data/
+outputs/
+models/
+bakeoff-out/
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+*.bin
+*.db
+*.sqlite
+*.sqlite3
+
+# --- generated service files (templates are committed) ---
+deploy/launchd/*.plist
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# --- os / editors ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- personal working notes ---
+user_notes.md

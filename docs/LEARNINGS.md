@@ -1,0 +1,353 @@
+# Learnings: local image generation for classroom materials
+
+What this proof of concept tried, measured and decided (October 2026), written
+so the next project, a whole-book illustration harness, can start from facts
+instead of assumptions. Versions and dates matter: this ecosystem changes
+monthly, so re-check anything marked *as of* before relying on it.
+
+**Verdict:** a 24 GB Apple Silicon MacBook can host a genuinely useful local
+image model. The winner was **FLUX.2 [klein] 4B (8-bit) via mflux**: ~10 s per
+1024² picture warm, ~19 s for an edit with a reference picture, about 11 GB at
+peak, Apache-2.0. It produces exactly the flat, bold-outline worksheet style
+teachers need, and good storybook art. A local LLM director (`gemma4:12b`)
+turns it into a chat model that can also answer questions.
+
+---
+
+## 1. Platform constraints (the facts that shaped everything)
+
+| Fact (as of Oct 2026) | Consequence |
+|---|---|
+| **Docker containers on macOS cannot use the Apple GPU** (Docker Desktop GPU passthrough is Windows/NVIDIA only; Apple's `container` CLI 1.5 has no GPU; Podman/krunkit Vulkan works only for llama.cpp, at roughly 50–80% of native speed). CPU-only diffusion would take minutes per image. | The image model runs **natively** (launchd). Only the UI lives in Docker. |
+| Docker Desktop's `host.docker.internal` reaches services bound to the Mac's **127.0.0.1** (verified). | Native services never need to listen on the network. |
+| **Ollama removed image generation** in v0.32.6 (2026-08-04) after an experimental run from v0.14 (Jan 2026, z-image-turbo and flux2-klein only). Maintainers say it will return on the new MLX runner, no date. 0.40.x returns 404 on `/v1/images/*`. | Ollama is only the LLM (director). The image server has an adapter seam in case Ollama gains images again. |
+| LM Studio: no image generation. Docker Model Runner: a diffusers engine exists on macOS in code, but it is pinned to an old diffusers (no Qwen-Image-2.1), does text-to-image only, and a contributor says DMR is being deprecated in favour of `llmman`. | Not usable as the foundation. |
+| **24 GB Mac → ~17.76 GiB Metal working set** (`recommendedMaxWorkingSetSize`, `iogpu.wired_limit_mb=0`). | **One big model at a time.** No pair of the candidate image models fits together (weights alone: klein 8.0 + Z-Image 10.2 GiB = 18.2 GiB), nor an image model next to a 12B LLM. |
+| The M5 GPU has per-core **Neural Accelerators**; MLX uses them on macOS 26.2+ (Apple: FLUX ≥3.8× faster on M5 than M4). PyTorch MPS only partially (2.14 prefill attention); stable-diffusion.cpp's Metal tensor path had an open M5 blank-image bug. | **MLX-based runtimes win on M5.** |
+
+## 2. Models: landscape, licenses, measurements
+
+### Candidates that fit 24 GB (as of Oct 2026)
+
+| Model | Params (incl. text encoder) | License | Notes |
+|---|---|---|---|
+| **FLUX.2 [klein] 4B** | 3.9B + Qwen3-4B | Apache-2.0 | 4 distilled steps; text-to-image **and** editing with up to 4 references; LoRA-trainable. mflux q8 = 8.6 GB. **Chosen.** |
+| Z-Image-Turbo | 6.2B + Qwen3-4B | Apache-2.0 | 9 steps; strong text-to-image; **no editing** (Z-Image-Edit unreleased). q8 = 11 GB. |
+| Qwen-Image-2.1 / -Turbo | 7.1B DiT + **8.8B** Qwen3-VL encoder (≈33 GB bf16, so "8B" is misleading) | **Qwen Research License: research or evaluation only** | Top open-weights quality, native **RGBA**, **up to 10 references**, text rendering. Needs ~4-bit on 24 GB (q4 = 10 GB). Earlier Qwen-Image releases were Apache-2.0; 2.1 is not. |
+| Ming-Image-0.1-Design | 6.2B + ~16B MoE encoder | MIT | Native RGBA, strong design/typography; slow (12 steps); not benchmarked here. |
+| ERNIE-Image-Turbo | 8B | Apache-2.0 | Text-to-image only; not benchmarked here. |
+| FLUX 3 Image Klein (2026-10-15) | 5.6B | FLUX Kommunity (commercial outputs only under US$5M revenue; terminable on notice; gated) | 10 references, strong. mflux peaks 18.5–22.8 GB, **over** the 24 GB budget today; also wants a 9.4B prompt upsampler. Watch for 2.0. |
+
+Avoid for this use: FLUX.2 klein 9B, FLUX.2 dev, FLUX.1 dev/Kontext. Their
+non-commercial licenses exclude use "connected to … employment
+responsibilities", which arguably covers a teacher's own job. Chroma has no
+safety alignment, HunyuanImage is territory-restricted, and the 20B Qwen-Image
+line is too heavy.
+
+Other licensing traps:
+
+- **rembg's default background model is RMBG-2.0, which is non-commercial.**
+  Select `birefnet-general` (MIT), or flood-fill a white background, as this
+  repo does.
+- Third-party quantized checkpoints can mislabel their license.
+- Teachers Pay Teachers announced (Oct 2026) a coming ban on AI-generated
+  resources. That matters for anything sold there.
+
+### Bake-off (this Mac, 1024², same prompts and seed)
+
+Prompts: three worksheet icons (apple, bus, sun), a coloring page (turtle), two
+storybook scenes, plus an edit ("same style, but a banana") from the apple.
+
+| Model | s / image (sustained run) | Warm, fresh process | Peak GPU memory | Edit |
+|---|---|---|---|---|
+| **FLUX.2 klein 4B q8** | 10–25 s | **~9–11 s** | 9–11 GB | 34 s sustained / **~19 s** warm (1 ref) |
+| Z-Image-Turbo q8 | 31–48 s | — | 11.8 GB | n/a |
+| Qwen-Image-2.1-Turbo q4 | 37–61 s | — | 14.2 GB | 61 s / 15.0 GB |
+
+Times rose during long runs (sustained load). Quality on the classroom styles:
+
+- **klein:** crisp flat icons with bold outlines and charm, clean thick-line
+  coloring pages, lovely watercolor storybook art. The edit kept the style
+  exactly: an apple icon became a matching banana icon, and an owl icon became
+  the same owl as a coloring page.
+- **Z-Image:** chunkier, bolder icons that also work well. Its coloring page
+  picked up gray shading despite "no gray". It's 3–4× slower and can't edit.
+- **Qwen-2.1:** clean and comparable. Its coloring lines are thinner, which
+  makes them less kid-friendly. Excellent edits, but the slowest, the most
+  memory, and a license problem.
+
+**For the full harness, compare per task.** klein is the default for speed,
+editing and consistent icon sets. Qwen-2.1 has the strongest multi-reference
+and RGBA features if licensing allows. Z-Image is an alternative look for
+single illustrations. FLUX 3 klein is the upgrade to watch once its memory use
+fits.
+
+## 3. Runtimes compared (model server role)
+
+| Runtime | Verdict | Why |
+|---|---|---|
+| **mflux** (MLX, MIT) | **Chosen** | Fastest scriptable path on M5; supports klein, Z-Image, Qwen-2.1 (10 refs, RGBA), FLUX 3 klein; clean Python API. No HTTP server, so this repo wrote a ~300-line FastAPI wrapper. Releases weekly: pin versions. |
+| stable-diffusion.cpp `sd-server` | Good no-code fallback | OpenAI-style `/v1/images/*` out of the box, GGUF (smallest memory). But no auth, echoes any CORS origin, one model per process, slower than MLX, and had an M5 blank-image bug. |
+| ComfyUI | Good for complex multi-pass graphs | Full API and day-0 model support, but PyTorch MPS is slower (enable `--use-pytorch-cross-attention`), int8 has no speedup on MPS, and the API is workflow-JSON. Worth revisiting for 2.0 pipelines. |
+| Draw Things | Great manual tool | Probably the fastest engine, but its HTTP API lives only inside the GUI app: no auth, a single init image. Its headless server is gRPC. |
+| LocalAI, Rapid-MLX, koboldcpp, InvokeAI, diffusers+MPS | Not chosen | Large surfaces or insecure defaults; Qwen-2.1 edits single-image only or unreleased; diffusers bf16 doesn't fit 24 GB. |
+
+## 4. mflux practical notes (0.23.0, mlx 0.32.4)
+
+- **Pin `pillow>=12.3,<13`** on Python 3.12: Pillow 13 uses PEP 810 lazy
+  imports, which break `import mflux`.
+- **Load from the pinned snapshot directory** (`~/.cache/huggingface/hub/models--org--name/snapshots/<rev>`)
+  with an **explicit `ModelConfig`** and `quantize=None` (pre-quantized weights
+  carry their level). Without `model_path`, mflux silently falls back to the
+  original bf16 repo, a 15–33 GB download. Set `HF_HUB_OFFLINE=1` before
+  anything imports `huggingface_hub`.
+- **FLUX.2 klein:** `Flux2Klein` does text-to-image; `Flux2KleinEdit` handles
+  references and crashes without them. Loading both would double memory, so
+  build the edit object as a view over the loaded model:
+  `Flux2KleinEdit.__new__`, `nn.Module.__init__`, then `dict.update(edit, t2i)`
+  and `edit.__dict__.update(t2i.__dict__)`. Don't use `Module.update()`, which
+  expects a parameter tree. Guidance stays 1.0 (distilled), 4 steps.
+  References are PIL images or paths, each scaled to ≤1 MP; output size comes
+  only from width/height.
+- **Z-Image-Turbo:** pass `num_inference_steps=9` (the API default of 4 is too
+  few). Guidance and negative prompts are ignored.
+- **Qwen-Image-2.1-Turbo:** use `QwenImage21Edit` for everything; it's the only
+  class that returns RGBA. Pass `ModelConfig.qwen_image_21_turbo()` explicitly
+  (the class default is the base model, and the repo name infers 2512).
+  Width and height must be multiples of 32 (it raises, it doesn't round),
+  guidance exactly 1, and `output_resolution=512` for references to stay under
+  24 GB. Clear `prompt_cache` after each call, since it grows without bound.
+  Transparency is requested in the prompt ("This is an RGBA image with transparency…").
+- **Threading:** run every MLX call on **one long-lived thread**. MLX ≥0.31.2
+  binds streams to threads.
+- **Memory:** to free it, drop every reference, then `gc.collect()`, then
+  `mx.clear_cache()` (`mx.metal.clear_cache` is deprecated). Cap the cache with
+  `mx.set_cache_limit(2 GB)`. On a failure, `traceback.clear_frames()` first,
+  because failed frames still hold the model. Weights load lazily, and
+  `mx.compile` recompiles for each new size, so the first image at a size is
+  slower.
+- **Cancel / progress:** `model.callbacks.register(obj)`. mflux calls
+  `obj.call_in_loop(t=…, seed=…, latents=…, config=…, …)` with keywords at each
+  step, and any exception except KeyboardInterrupt stops generation cleanly.
+  There is no unregister, so register one hook per loaded model. This repo uses
+  it to stop jobs whose client left; the same hook can stream step progress.
+- `TQDM_DISABLE=1` keeps logs clean; mflux still reads the elapsed time.
+
+## 5. Image server design (what worked)
+
+- **OpenAI Images API subset:** `/v1/images/generations` (JSON) and
+  `/v1/images/edits` (multipart, `image` or `image[]`). Unknown model names
+  (e.g. `dall-e-2` from Open WebUI's built-in engine) fall back to the
+  defaults. Responses include seed, seconds and the real width/height.
+- **One MLX worker thread, one resident model, FIFO turns.** Ollama is freed
+  right before each job (not at enqueue). Jobs check a cancel flag between
+  images and steps; a disconnect watcher sets it.
+- **Standby:** unload after 10 idle minutes, then SIGTERM self; launchd
+  KeepAlive restarts a fresh process (~50 MB, measured live) instead of ~400 MB
+  of imported libraries. The restart is skipped if a fingerprint of `.env`,
+  `uv.lock` and the sources changed since startup, so a half-done edit can't
+  crash-loop it. The first picture after standby costs ~1–2 s extra.
+- **Security for a loopback service:**
+  - token checked **before any body is read**: routes declare no body
+    parameters, because FastAPI reads bodies before dependencies run
+  - `TrustedHostMiddleware` against DNS rebinding, and no CORS
+  - capped JSON and multipart bodies (including chunked)
+  - image decoding with a format allowlist, a 50 MP decompression-bomb cap,
+    tRNS / 16-bit handling, and best-effort EXIF
+  - PNG metadata records model and seed, never the prompt
+  - outputs archived to a 0700 folder
+- **Edits keep the reference's aspect ratio** unless a size is given (as in
+  OpenAI's API). Phone photos are rarely square.
+
+## 6. Open WebUI 0.9.2 integration (internals that weren't obvious)
+
+**How a pipe model appears**
+
+- A single pipe's model id is the function id, and its name is the function's
+  DB name. The model is **invisible to `user`-role accounts** until a `model`
+  row with that id exists and has a read **access grant**. In 0.9.2,
+  `access_control` is silently ignored: use `access_grants`. A row with
+  `base_model_id=None` overrides name, capabilities and avatar, the same way
+  admins override Ollama models.
+- Image attachments need both `capabilities.vision` and `file_upload`. Set
+  `file_context: false` (no RAG on attachments) and `builtin_tools: false`.
+
+**What a pipe receives**
+
+- Attached images arrive in `body["messages"][-1]["content"]` as
+  `image_url` parts with `data:` URLs, and earlier user uploads are re-sent
+  every turn.
+- Assistant history comes back as text, including earlier reasoning blocks in
+  their original `<think>…</think>` tags (`raw=True`). That's how the director
+  can answer "what prompt did you use?". `__files__` never contains images.
+- **Background tasks call the pipe itself** (title, tags, follow-ups) with
+  `__task__` set, when no external task model is configured. Answer them with
+  tiny JSON, never by drawing.
+
+**Returning results**
+
+- Store PNGs with `open_webui.routers.files.upload_file_handler(..., process=False, process_in_background=False, user=UserModel)`,
+  then `Chats.insert_chat_files(...)`, and return markdown
+  `![alt](/api/v1/files/{id}/content)` plus
+  `[Download PNG](…/content?attachment=true)`.
+  - These work for the owner over the session cookie, from other machines.
+  - Never inline base64: it's stored about 4 times per image and re-sent every
+    turn.
+  - Raw HTML such as `<a download>` is printed as text.
+- A pipe can return an **async generator**; Open WebUI streams it.
+  `<think>` tags become a collapsed "Thought for N seconds" block, but **only
+  in streaming mode**. Non-streaming shows them raw, so check `body["stream"]`.
+  Defuse model-written text: a `<thinking>` inside a reply opens a reasoning
+  block, and a chunk starting with `data:` is treated as a raw SSE line.
+- Status events (`{"type":"status","data":{description,done,hidden}}`) are
+  persisted. Close them on every exit, including Stop (`CancelledError`).
+- `ConfigVar` settings (formerly PersistentConfig) ignore environment
+  variables after the first launch; configure through the admin UI or DB.
+
+**Installing without API keys**
+
+API keys were off on the target instance, so `scripts/owui_install.py` runs
+**inside the container** with Open WebUI's own async data layer:
+
+- `WEBUI_SECRET_KEY` read from the container's key file, and
+  `ENABLE_DB_MIGRATIONS=False`
+- a sqlite-backup of `webui.db` before every write
+- validation through `load_function_module_by_id` under a probe id
+- idempotent re-runs that keep admin edits (fingerprints of the values it
+  wrote), store valves only as overrides, and add grants only on first install
+
+**Moving to 0.12.x**
+
+- `load_function_module_by_id` returns 4 values (handled).
+- `upload_image` returns a dict.
+- Native function calling adds an `<attached_files>` block to user messages
+  (stripped).
+- A new `context_compaction` task exists.
+- **Security:** 0.9.2 is affected by three published cross-user file-access
+  advisories: [GHSA-vrhc-3fr6-pc3c](https://github.com/open-webui/open-webui/security/advisories/GHSA-vrhc-3fr6-pc3c)
+  (CVE-2026-54010, CVSS 8.3, fixed in 0.9.6), [GHSA-r472-mw7m-967f](https://github.com/open-webui/open-webui/security/advisories/GHSA-r472-mw7m-967f)
+  (CVE-2026-45402, CVSS 8.1, fixed in 0.9.5) and [GHSA-6xhv-rxhv-pwm4](https://github.com/open-webui/open-webui/security/advisories/GHSA-6xhv-rxhv-pwm4)
+  (CVE-2026-70487, CVSS 5.3 GitHub / 6.5 NVD, fixed in 0.11.0). Build the next
+  project against 0.11.0 or later; 0.12.3 is current (as of 2026-10-17).
+- The generated secret key lives in the container layer, so recreating the
+  container signs everyone out.
+
+## 7. The director (LLM in the loop)
+
+- **Free-form prompt rewriting by small models drifted badly.**
+  `ministral-3:3b` turned "a cute owl for my reading worksheet" into a
+  watercolor branch scene, gave a coloring page pastel fills, and answered an
+  attached "turn this into a coloring page" with a text reply.
+- **Classification plus templates fixed it.** The director returns
+  `{action: draw|reply, kind: icon|coloring|storybook|other, edit_previous, subject, reply}`
+  through Ollama structured output (`format` = JSON schema, `think: false`,
+  `temperature: 0`). Code builds the prompt from fixed style templates. Hard
+  rules override the model: an attached picture always means draw; options
+  mean draw unless the teacher is asking about them.
+- **Scores on 7 test cases:** `gemma4:12b` 7/7 (≈2–3 s warm, ~6 s cold),
+  `qwen2.5:3b` 5/7, `ministral-3:3b` 4/7. Default: `gemma4:12b`
+  (Apache-2.0, vision-capable).
+- **Memory interplay:** the director (~8 GB) is unloaded before each picture
+  and reloads in a few seconds on the next message. Acceptable; a 3B director
+  would stay resident but decides worse.
+- Show the trace by default during testing. It made every decision auditable
+  and was the user's own request.
+
+## 8. Prompting that works for teachers (FLUX.2 klein)
+
+| Kind | Template |
+|---|---|
+| Worksheet icon | `{subject}, flat vector icon, bold clean black outlines, simple shapes, solid bright colors, centered, plain white background, no text` |
+| Coloring page | `{subject}, coloring book page for kids, black and white line art, thick clean outlines, no shading, no gray, plain white background, no text` |
+| Storybook | `children's picture book illustration: {subject}, warm gentle colors, soft watercolor style` (style only if none named) |
+
+Keep words out of pictures and add them in the worksheet tool. An edit with
+the previous picture as reference ("same style, but a banana") keeps an icon
+set consistent. Transparent icons come from generating on white and then
+flood-filling the white background from the border; interior whites survive.
+
+## 9. Operations
+
+- launchd agent: `KeepAlive`, `ProcessType=Interactive` (no background
+  throttling), `ThrottleInterval=15`, logs under `~/Library/Logs/…`. The
+  installer validates `.env` with the server's own rules **before** stopping
+  the running agent, waits for bootout, then health-polls.
+- `scripts/doctor.sh` checks:
+  - the agent, the loopback-only bind, and that Ollama is running but not
+    exposed
+  - the Open WebUI container
+  - the pipe's stored token against the server (from inside the container)
+  - the director model being pulled
+- Teachers reach Open WebUI at `http://<mac-ip>:3000` on the LAN. The Mac must
+  be awake and Docker Desktop running; Docker doesn't start at login by
+  default.
+
+## 10. Lessons from two review rounds (56 confirmed issues fixed)
+
+Multi-agent reviews, with every finding adversarially verified, caught things
+tests and manual runs didn't:
+
+- **FastAPI reads a body parameter before the auth dependency runs.** That
+  allowed unauthenticated memory exhaustion until the routes read bodies
+  themselves.
+- **Disconnected clients don't cancel FastAPI handlers.** Stop in Open WebUI
+  left orphan GPU jobs until a disconnect watcher, a cancel flag and an mflux
+  step hook were added.
+- Freeing Ollama "before a job" must mean right before it runs, not at
+  enqueue time.
+- Self-restart re-reads `.env`, so guard it or a bad edit becomes a crash loop.
+- Installer "preserve admin edits" logic was correct for one re-run and wrong
+  on the second; test idempotency with two consecutive runs.
+- Small things break real use:
+  - square output for a portrait photo
+  - a garbage EXIF block causing a 500
+  - a trailing backslash breaking markdown
+  - the status line left spinning after early exits
+  - documentation that overstated security
+
+## 11. Recommendations for the book-building harness
+
+1. **Reuse the image server instead of rewriting it.** Extract `image-server/`
+   as a package (pip-installable from git) or vendor it with attribution. Its
+   OpenAI-style API, memory discipline, cancellation and security are already
+   paid for. Add:
+   - a job queue with **step progress** (mflux `call_in_loop`)
+   - batch jobs
+   - a model-per-pass scheduler
+2. **Plan memory by pass, not by request.** Run all LLM planning first (story,
+   pages, character sheet, prompts), unload, then all image passes grouped by
+   model. Swaps cost seconds; ping-ponging between an LLM and an image model
+   costs minutes per book.
+3. **Character consistency comes from references:**
+   - klein: up to 4 references, Apache-2.0
+   - Qwen-2.1: up to 10 references plus RGBA, if the license is acceptable
+     for the use
+   - FLUX 3 klein: 10 references, once it fits 24 GB
+   Keep a per-book character library (front, side and expression sheets) and
+   pass the relevant sheets with every page prompt. Consider training a klein
+   LoRA per recurring character; check the memory needed on 24 GB first.
+4. **Build model comparison into the harness.** Generalize
+   `scripts/bakeoff.py`: same page prompts across models, timings and peak
+   memory recorded, a human picks in a contact-sheet UI, and choices are stored
+   per task (icons, scenes, covers).
+5. **Provenance per page:** model, revision, seed, prompt, references, steps
+   and size, so any page can be regenerated or tweaked exactly.
+6. **Keep the director pattern:** an LLM classifies or plans with structured
+   output; code templates write the image prompts. Story planning may want a
+   bigger model (`gpt-oss:20b`), which is fine as long as it runs in its own
+   pass before images.
+7. **Licensing for a commercial future:** stay on Apache-2.0/MIT image models
+   (klein 4B, Z-Image, Ming, ERNIE) or get licenses. Note the FLUX
+   non-commercial "employment responsibilities" clause, Qwen-2.1's
+   research-only terms, and marketplace AI policies.
+8. **A custom UI earns its keep there:** a book/page/character model, gallery,
+   template library, page layout and PDF export. Chat stops fitting once state
+   spans many pages. The Open WebUI pipe can stay as a quick chat front end on
+   the same server.
+9. **Start on a current Open WebUI** (≥0.11.0, see the advisories in section 6)
+   if it stays in the picture as a chat front end.
+10. **Open questions to re-check:**
+   - Ollama re-adding image generation (MLX runner)
+   - FLUX 3 klein memory on 24 GB
+   - Z-Image-Edit release
+   - running Open WebUI natively to drop Docker's VM (a few GB) from standby
