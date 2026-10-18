@@ -62,7 +62,7 @@ STYLE = {
     "colors, centered, plain white background, no text",
     "coloring": "{subject}, coloring book page for kids, black and white line art, thick clean "
     "outlines, no shading, no gray, plain white background, no text",
-    "storybook": "children's picture book illustration: {subject}, warm gentle colors{style}",
+    "storybook": "children's picture book illustration: {subject}, warm gentle colors{style}, no text",
     "other": "{subject}",
 }
 NAMED_STYLE_RE = re.compile(
@@ -623,12 +623,13 @@ class Pipe:
     async def _call_server(self, request: dict, references: list) -> dict:
         try:
             response = await self._post(request, references)
-        except httpx.ConnectError:
-            # The server restarts itself after long idle periods; give it a moment.
+        except (httpx.ConnectError, httpx.RemoteProtocolError):
+            # The server restarts itself after long idle periods (and a stop can end a picture
+            # it had no time to finish): give it a moment and ask once more.
             await asyncio.sleep(self._retry_delay)
             try:
                 response = await self._post(request, references)
-            except httpx.ConnectError:
+            except (httpx.ConnectError, httpx.RemoteProtocolError):
                 raise ServerError(
                     f"Couldn't reach the image server at {self.valves.IMAGE_SERVER_URL}. "
                     "Is it running on the Mac?"
@@ -662,8 +663,8 @@ class Pipe:
                     ]
                     return await client.post("/v1/images/edits", data=fields, files=files)
                 return await client.post("/v1/images/generations", json=request)
-        except httpx.ConnectError:
-            raise
+        except (httpx.ConnectError, httpx.RemoteProtocolError):
+            raise  # _call_server retries these once
         except httpx.TimeoutException:
             raise ServerError(
                 "The image server took too long. Try a smaller size or fewer pictures."

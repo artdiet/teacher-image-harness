@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check every link in the chain: launchd -> image server -> Open WebUI.
+# Check every link in the chain: launchd -> image server (and its LAN access) -> Open WebUI.
 # Prints no secrets. Exit code is non-zero if anything is wrong.
 set -uo pipefail
 
@@ -18,7 +18,14 @@ else bad "launchd agent not loaded: run scripts/install_image_server.sh"; fi
 if curl -sf --max-time 3 "http://127.0.0.1:$PORT/health" >/dev/null; then ok "answering on 127.0.0.1:$PORT"
 else bad "not answering on 127.0.0.1:$PORT (see ~/Library/Logs/teacher-image-harness/image-server.log)"; fi
 listeners=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 {print $9}' | sort -u)
-if [[ -n "$listeners" && -z "$(grep -v '^127\.0\.0\.1:' <<<"$listeners")" ]]; then ok "listening on loopback only"
+lan_host=$(sed -n 's/^IMAGE_SERVER_HOST=//p' "$REPO/.env" 2>/dev/null | tail -n 1 | tr -d "\"'")
+if [[ "$lan_host" == "0.0.0.0" ]]; then
+  # LAN mode (scripts/enable_lan.sh): token on every route, private-network clients only.
+  lan_ok=0
+  lan=$("$REPO/scripts/check_lan.sh" 2>&1) && lan_ok=1
+  lan=$(sed '2,$s/^/        /' <<<"$lan")  # indent continuation lines under the status column
+  if ((lan_ok)); then ok "LAN mode: $lan"; else bad "LAN mode: $lan"; fi
+elif [[ -n "$listeners" && -z "$(grep -v '^127\.0\.0\.1:' <<<"$listeners")" ]]; then ok "listening on loopback only"
 elif [[ -n "$listeners" ]]; then bad "listening beyond loopback: $listeners"; fi
 
 echo "ollama"

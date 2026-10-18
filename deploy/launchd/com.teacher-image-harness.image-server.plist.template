@@ -33,6 +33,16 @@
   <string>Interactive</string>
   <key>ThrottleInterval</key>
   <integer>15</integer>
+  <!-- On stop, running pictures get up to 25 s to finish before they are recorded as
+       interrupted; the default 20 s would cut that short with SIGKILL. -->
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+  <!-- The default 256 open files is little for a LAN server plus model files. -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>4096</integer>
+  </dict>
   <key>StandardOutPath</key>
   <string>__LOGS__/image-server.log</string>
   <key>StandardErrorPath</key>

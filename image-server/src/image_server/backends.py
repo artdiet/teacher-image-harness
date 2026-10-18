@@ -25,7 +25,7 @@ def init_mlx_thread() -> None:
 
 
 class StopHook:
-    """mflux step callback: stops a cancelled job between denoising steps.
+    """mflux step callback: reports progress and stops a cancelled job between steps.
 
     mflux has no unregister, so each loaded model gets one hook for its whole
     life and the current job's check is swapped in and out around each call.
@@ -33,10 +33,15 @@ class StopHook:
 
     def __init__(self) -> None:
         self.should_stop = None
+        self.on_step = None
 
-    def call_in_loop(self, **_: object) -> None:
+    def call_in_loop(self, **kwargs: object) -> None:
         if self.should_stop is not None and self.should_stop():
             raise JobCancelled("stopped between steps")
+        total = getattr(kwargs.get("config"), "num_inference_steps", None)
+        t = kwargs.get("t")
+        if self.on_step is not None and isinstance(t, int) and total:
+            self.on_step(t + 1, total)
 
     def attach(self, model) -> StopHook:
         model.callbacks.register(self)
@@ -92,7 +97,7 @@ class Flux2KleinBackend:
             self._edit = edit
         return self._edit
 
-    def generate(self, *, prompt, seed, width, height, steps, guidance, references, should_stop=None):
+    def generate(self, *, prompt, seed, width, height, steps, guidance, references, should_stop=None, on_step=None):
         common = dict(
             seed=seed,
             prompt=prompt,
@@ -101,14 +106,14 @@ class Flux2KleinBackend:
             height=height,
             guidance=1.0,  # distilled checkpoint: guidance is fixed
         )
-        self._stop.should_stop = should_stop
+        self._stop.should_stop, self._stop.on_step = should_stop, on_step
         try:
             if references:
                 result = self._edit_view().generate_image(image_paths=list(references), **common)
             else:
                 result = self._t2i.generate_image(**common)
         finally:
-            self._stop.should_stop = None
+            self._stop.should_stop = self._stop.on_step = None
         return result.image
 
     def close(self) -> None:
@@ -132,10 +137,10 @@ class ZImageTurboBackend:
         )
         self._stop = StopHook().attach(self._model)
 
-    def generate(self, *, prompt, seed, width, height, steps, guidance, references, should_stop=None):
+    def generate(self, *, prompt, seed, width, height, steps, guidance, references, should_stop=None, on_step=None):
         if references:
             raise ValueError("z-image-turbo cannot use reference images")
-        self._stop.should_stop = should_stop
+        self._stop.should_stop, self._stop.on_step = should_stop, on_step
         try:
             result = self._model.generate_image(
                 seed=seed,
@@ -145,7 +150,7 @@ class ZImageTurboBackend:
                 height=height,
             )
         finally:
-            self._stop.should_stop = None
+            self._stop.should_stop = self._stop.on_step = None
         return result.image
 
     def close(self) -> None:
@@ -175,8 +180,8 @@ class QwenImage21TurboBackend:
         self._model.tiling_config = TilingConfig(vae_decode_tile_size=512)
         self._stop = StopHook().attach(self._model)
 
-    def generate(self, *, prompt, seed, width, height, steps, guidance, references, should_stop=None):
-        self._stop.should_stop = should_stop
+    def generate(self, *, prompt, seed, width, height, steps, guidance, references, should_stop=None, on_step=None):
+        self._stop.should_stop, self._stop.on_step = should_stop, on_step
         try:
             result = self._model.generate_image(
                 seed=seed,
@@ -189,7 +194,7 @@ class QwenImage21TurboBackend:
                 output_resolution=self.reference_budget,
             )
         finally:
-            self._stop.should_stop = None
+            self._stop.should_stop = self._stop.on_step = None
             cache = getattr(self._model, "prompt_cache", None)
             if cache:
                 cache.clear()  # grows without bound otherwise

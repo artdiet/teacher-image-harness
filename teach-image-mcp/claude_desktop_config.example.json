@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "teach-image": {
+      "command": "node",
+      "args": ["/path/to/teach-image/server/index.mjs"],
+      "env": {
+        "IMAGE_SERVER_URL": "http://your-mac-name.local:7865",
+        "IMAGE_SERVER_TOKEN": "paste this computer's token from scripts/client_tokens.sh add <name>",
+        "IMAGE_OUTPUT_DIR": "",
+        "UV_THREADPOOL_SIZE": "16"
+      }
+    }
+  }
+}

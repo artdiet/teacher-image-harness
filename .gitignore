@@ -32,6 +32,11 @@ __pycache__/
 dist/
 build/
 
+# --- node (teach-image-mcp) ---
+node_modules/
+*.mcpb
+*.plugin
+
 # --- os / editors ---
 .DS_Store
 .idea/
