@@ -525,3 +525,56 @@ area) confirmed 17 more, mostly about shutdown:
    - FLUX 3 klein memory on 24 GB
    - Z-Image-Edit release
    - running Open WebUI natively to drop Docker's VM (a few GB) from standby
+
+## 13. Hardware and hosting (as of Oct 2026)
+
+Researched 2026-10-18 for "what would I buy to run or share this?". Prices
+are US list prices and move fast (a 2026 memory shortage raised Mac, GPU, RAM
+and SSD prices and stretched delivery times); re-check before buying.
+
+**What decides speed on a Mac:** the GPU generation. M5/M6 GPUs have neural
+accelerators: Apple measured about 3.8× faster FLUX on an M5 than an M4, and
+an $899 M6 Mac mini drew a FLUX.1 image in 36 s against 94 s on an M4 (third
+party). MLX uses them only on macOS 26.2+. The pinned MLX needs macOS 14+.
+
+| Machine (Oct 2026) | US price | klein 4B per 1024² | Notes |
+|---|---|---|---|
+| Mac mini M5 Pro, 24 GB / 512 GB | $1,699 | ~9.5 s (same chip as this MacBook) | the known-good setup; 6 W idle |
+| Mac mini M5 Pro, 48 GB / 512 GB | ~$2,299 | ~9.5 s (~7.5–8 s with the 20-core GPU, +$200) | room for the director and image model together (estimate) |
+| Mac mini M6, 24 GB / 512 GB | $1,299 | ~13–22 s (estimate) | budget; 16 GB ($899) only for the image server alone |
+| Mac Studio M5 Max, 36 GB | $2,499 | ~5–6.5 s (estimate) | for several teachers on one machine |
+| PC + RTX 5060 Ti 16 GB | ~$1,750–2,500 (card ~$620–880) | ~5–6 s (estimate) | needs FP8 weights to keep everything on the GPU; ~40–80 W idle (estimate) |
+| PC + RTX 5070 Ti 16 GB | ~$2,100–2,800 | ~3 s (estimate) | |
+| DGX Spark / Strix Halo 128 GB | ~$3,400–7,000 | ~3–12 s (estimates) | only worth it for large LLMs; not for picture speed |
+
+Not worth buying for this: M4/M4 Pro Macs (no GPU neural accelerators), an
+RTX 5090 (about 2.5× its $1,999 list price, supply uncertain). Faster hardware
+has diminishing returns through Claude: each tool call spends about 2.9 s on
+the cloud-to-Mac link (section 11).
+
+**Licenses for sharing or a service** (from the model cards):
+
+- FLUX.2 klein 4B and Z-Image-Turbo: Apache-2.0, commercial use allowed.
+- FLUX.2 klein 9B and FLUX.2 dev: FLUX Non-Commercial. A salaried teacher's
+  classroom use is arguably "connected to ... employment responsibilities",
+  so keep them off.
+- Qwen-Image-2.1: research or evaluation only (a 2026 rollback from Apache).
+- FLUX 3 Image Klein (2026-10-15, mflux 0.23 runs it): free for people and
+  companies under $5M revenue generating their own outputs; hosting it for
+  others is unclear, so opt-in only.
+- Open WebUI keeps its branding clause above 50 users. Purely AI-generated
+  images are generally not copyrightable (US Copyright Office, 2025).
+
+**Hosted alternatives** (no GPU needed): klein 4B costs about $0.0012 per
+1024² picture on Cloudflare Workers AI (about 96 free per day), $0.005 on fal,
+$0.014 on BFL. A heavy classroom year of 10,000 pictures is roughly $12–140.
+An always-on cloud L4 ($320–580 a month) only beats those above roughly
+80,000–370,000 pictures a month. For a future paid service: start with a
+hosted API or a per-second serverless GPU running a diffusers port, not
+owned hardware.
+
+**Schools:** local generation keeps prompts and any student photos on the
+teacher's machine, which keeps FERPA/COPPA questions simple. With a cloud
+backend, keep student names and photos out of prompts. Districts usually
+approve tools rather than host AI servers (CoSN 2026: 86% vet tools, 7%
+prepare AI storage). Not legal advice.

@@ -136,15 +136,22 @@ or later**: it uses Apple's MLX. Measured on an M5 Pro MacBook Pro with 24 GB:
 - **Disk:** about 9 GB for the image server with klein; about 45 GB for
   everything above. 256 GB of storage is enough; more leaves room for
   pictures and future models.
-- **Speed** depends on the GPU and has only been measured on the M5 Pro;
-  expect slower chips to take proportionally longer per picture.
+- **Speed** has only been measured on the M5 Pro (16-core GPU). The chip
+  generation matters more than its size: M5- and M6-family GPUs have neural
+  accelerators that make image generation roughly 3–4× faster than M4 and
+  older chips, and MLX uses them only on macOS 26.2 or later. Expect an M4
+  Mac to be several times slower than the numbers above.
 - **Network:** for other computers, a home network the Mac stays on (a
   fixed address or its `.local` name). No internet connection is needed at
   run time; the models download once (`scripts/download_models.sh`).
 
-Running it on a PC with an NVIDIA GPU would mean replacing the MLX backend
-with PyTorch (`image-server/src/image_server/backends.py`); the job API, the
-extension and the Open WebUI pipe would stay as they are.
+Other hardware, untested: mflux has an early Linux/NVIDIA path through MLX's
+CUDA backend, which might run the server unchanged. Otherwise
+`image-server/src/image_server/backends.py` can be ported to diffusers'
+`Flux2KleinPipeline` (PyTorch, Apache-2.0; text-to-image and edits in one
+class, about 8 GB of GPU memory with FP8 weights). Either way the job API, the
+extension and the Open WebUI pipe stay as they are. Hardware and hosting
+options are in [docs/LEARNINGS.md](docs/LEARNINGS.md#13-hardware-and-hosting-as-of-oct-2026).
 
 ## Setup
 
