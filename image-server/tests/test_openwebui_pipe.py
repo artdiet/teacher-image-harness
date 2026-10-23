@@ -296,7 +296,9 @@ def test_friendly_errors(pipe, owui):
     assert "Couldn't reach the image server" in run(pipe, [user("a sun")])
 
 
-def test_retry_once_after_connection_refused(pipe, owui):
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.RemoteProtocolError])
+def test_retry_once_after_a_restart(pipe, owui, error):
+    # Refused while the server restarts, or dropped mid-picture by a stop.
     real = pipe._transport
     attempts = []
 
@@ -304,7 +306,7 @@ def test_retry_once_after_connection_refused(pipe, owui):
         async def handle_async_request(self, request):
             attempts.append(1)
             if len(attempts) == 1:
-                raise httpx.ConnectError("restarting", request=request)
+                raise error("restarting", request=request)
             return await real.handle_async_request(request)
 
     pipe._transport = FlakyTransport()
@@ -440,7 +442,7 @@ def test_raw_flag_skips_the_director(pipe, owui, director):
 
 
 def test_storybook_style_is_added_only_when_none_named(pipe_module):
-    assert pipe_module.build_prompt("storybook", "a bear picnic").endswith("soft watercolor style")
+    assert pipe_module.build_prompt("storybook", "a bear picnic").endswith("soft watercolor style, no text")
     assert "watercolor" not in pipe_module.build_prompt("storybook", "a bear picnic in colored pencil")
 
 

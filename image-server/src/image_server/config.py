@@ -99,6 +99,8 @@ class Settings:
     max_n: int = 4
     max_pixels: int = 1536 * 1024
     max_upload_bytes: int = 20 * 1024 * 1024
+    private_clients_only: bool = True  # refuse clients outside private/loopback ranges
+    client_tokens_file: Path | None = None  # default: <data_dir>/client_tokens.json
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
@@ -112,7 +114,7 @@ class Settings:
             port=_int("PORT", get("PORT"), defaults.port),
             token=(get("TOKEN") or "").strip(),
             allow_remote=_bool(get("ALLOW_REMOTE"), defaults.allow_remote),
-            allowed_hosts=tuple(h.strip() for h in hosts.split(",") if h.strip())
+            allowed_hosts=tuple(h.strip().lower() for h in hosts.split(",") if h.strip())
             if hosts
             else defaults.allowed_hosts,
             data_dir=Path(get("DATA_DIR") or DEFAULT_DATA_DIR).expanduser(),
@@ -130,7 +132,14 @@ class Settings:
             max_n=_int("MAX_N", get("MAX_N"), defaults.max_n),
             max_pixels=_int("MAX_PIXELS", get("MAX_PIXELS"), defaults.max_pixels),
             max_upload_bytes=_int("MAX_UPLOAD_BYTES", get("MAX_UPLOAD_BYTES"), defaults.max_upload_bytes),
+            private_clients_only=_bool(get("PRIVATE_CLIENTS_ONLY"), defaults.private_clients_only),
+            client_tokens_file=Path(get("CLIENT_TOKENS_FILE")).expanduser()
+            if get("CLIENT_TOKENS_FILE") else None,
         )
+
+    @property
+    def tokens_file(self) -> Path:
+        return self.client_tokens_file or self.data_dir / "client_tokens.json"
 
     def enabled_models(self) -> dict[str, ModelSpec]:
         return {

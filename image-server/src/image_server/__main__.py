@@ -25,6 +25,49 @@ def fingerprint(env_path: str) -> str:
     return digest.hexdigest()
 
 
+def uvicorn_options() -> dict:
+    """How the server runs under uvicorn (tests/test_shutdown.py starts it the same way)."""
+    from .connections import GuardedH11Protocol
+    from .jobs import SHUTDOWN_GRACE_SECONDS
+
+    return {
+        "log_level": "info",
+        "access_log": False,
+        "server_header": False,
+        # Per-client connection caps and stall deadlines instead of uvicorn's global
+        # limit_concurrency, which any LAN device could fill with idle sockets.
+        "http": GuardedH11Protocol,
+        # No proxy in front: the peer address is the client (the private-network filter
+        # and the loopback-only primary token rely on it).
+        "proxy_headers": False,
+        # On stop, uvicorn waits for open requests before the app's own shutdown (which
+        # finishes or records background jobs). Without a limit one stalled client keeps a
+        # stopping server alive forever with its listener already closed. Open requests
+        # (Open WebUI's pictures) get the same grace as background jobs, on one clock started
+        # by serve(); grace + stopping + unloading stays under launchd's ExitTimeOut (60 s).
+        "timeout_graceful_shutdown": int(SHUTDOWN_GRACE_SECONDS),
+    }
+
+
+def serve(app, host: str, port: int, *, on_stop, **overrides) -> None:
+    """Run `app` like uvicorn.run(), calling on_stop() as soon as a stop is requested."""
+    import uvicorn
+
+    class DrainingServer(uvicorn.Server):
+        def handle_exit(self, sig, frame) -> None:
+            if not self.should_exit:
+                on_stop()  # in the signal handler: before uvicorn even closes its listener
+            super().handle_exit(sig, frame)
+
+    server = DrainingServer(uvicorn.Config(app, host=host, port=port, **{**uvicorn_options(), **overrides}))
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    if not server.started:
+        sys.exit(3)  # like uvicorn.run: a failed start (port in use) exits non-zero for launchd
+
+
 def main() -> None:
     # The repo-root .env (gitignored) holds the token. Real env vars take precedence.
     # Loaded before anything imports huggingface_hub, so HF_HOME set there applies too.
@@ -56,8 +99,6 @@ def main() -> None:
         folder.mkdir(parents=True, exist_ok=True)
         folder.chmod(0o700)  # prompts and pictures are private
 
-    import uvicorn
-
     from .app import create_app
     from .backends import create_backend, init_mlx_thread
     from .engine import Engine
@@ -71,15 +112,8 @@ def main() -> None:
         before_job=before_job if settings.free_ollama else None,
         thread_initializer=init_mlx_thread,
     )
-    uvicorn.run(
-        create_app(settings, engine, restart_allowed=lambda: fingerprint(env_path) == startup_fingerprint),
-        host=settings.host,
-        port=settings.port,
-        log_level="info",
-        access_log=False,
-        server_header=False,
-        limit_concurrency=16,
-    )
+    app = create_app(settings, engine, restart_allowed=lambda: fingerprint(env_path) == startup_fingerprint)
+    serve(app, settings.host, settings.port, on_stop=app.state.jobs.begin_shutdown)
 
 
 if __name__ == "__main__":

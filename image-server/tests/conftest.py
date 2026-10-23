@@ -26,6 +26,9 @@ class FakeBackend:
 
     def generate(self, **kwargs) -> Image.Image:
         self.calls.append(kwargs)
+        for step in (1, 2):  # report progress like the mflux step hook
+            if kwargs.get("on_step"):
+                kwargs["on_step"](step, 2)
         w, h = kwargs["width"], kwargs["height"]
         image = Image.new("RGB", (w, h), (255, 255, 255))
         ImageDraw.Draw(image).rectangle([w // 4, h // 4, 3 * w // 4, 3 * h // 4], fill=(0, 0, 0))
@@ -53,7 +56,7 @@ def make_client(settings):
 
     def _make(settings: Settings = settings, base_url: str = "http://127.0.0.1") -> TestClient:
         engine = Engine(FakeBackend, release_memory=lambda: None)
-        client = TestClient(create_app(settings, engine), base_url=base_url)
+        client = TestClient(create_app(settings, engine), base_url=base_url, client=("127.0.0.1", 50000))
         client.__enter__()
         clients.append(client)
         return client

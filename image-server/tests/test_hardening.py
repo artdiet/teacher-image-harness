@@ -98,7 +98,7 @@ def test_input_the_model_rejects_is_a_400_and_keeps_the_model(make_client, auth,
     engine = Engine(Picky, release_memory=lambda: None)
     from fastapi.testclient import TestClient
 
-    with TestClient(create_app(settings, engine), base_url="http://127.0.0.1") as client:
+    with TestClient(create_app(settings, engine), base_url="http://127.0.0.1", client=("127.0.0.1", 50000)) as client:
         r = client.post("/v1/images/generations", json={"prompt": "x"}, headers=auth)
         assert r.status_code == 400 and "too small" in r.text
         assert engine.loaded_model == "flux2-klein-4b"

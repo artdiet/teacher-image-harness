@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import logging
+import sys
 import threading
 import time
 import traceback
@@ -32,6 +34,7 @@ class Backend(Protocol):
         guidance: float | None,
         references: list[Image.Image],
         should_stop: Callable[[], bool] | None = None,
+        on_step: Callable[[int, int], None] | None = None,
     ) -> Image.Image: ...
 
     def close(self) -> None: ...
@@ -42,6 +45,10 @@ BackendFactory = Callable[[ModelSpec], Backend]
 
 class EngineBusy(RuntimeError):
     """Too many jobs are already waiting."""
+
+
+class EngineClosed(EngineBusy):
+    """The server is shutting down and takes no new work."""
 
 
 class JobCancelled(RuntimeError):
@@ -60,6 +67,11 @@ class Job:
     guidance: float | None = None
     references: list[Image.Image] = field(default_factory=list)
     cancel: threading.Event = field(default_factory=threading.Event)
+    on_start: Callable[[], None] | None = None  # called on the MLX thread when the job starts
+    on_progress: Callable[[float], None] | None = None  # 0.0 .. 1.0 across all n images
+    # True while the job waits for its turn: only then may its asyncio task be cancelled
+    # (once it runs on the MLX thread, a cancel must go through `cancel` instead).
+    waiting: bool = False
 
 
 @dataclass
@@ -78,6 +90,24 @@ def release_mlx_memory() -> None:
     clear = getattr(mx, "clear_cache", None) or getattr(getattr(mx, "metal", None), "clear_cache", None)
     if clear is not None:
         clear()
+
+
+def mlx_memory_stats(reset_peak: bool = False) -> dict:
+    """GPU memory numbers in GB, only if MLX is already loaded (never imports it)."""
+    mx = sys.modules.get("mlx.core")
+    if mx is None:
+        return {}
+    gb = 1e9
+    stats = {"active_gb": round(mx.get_active_memory() / gb, 2),
+             "peak_gb": round(mx.get_peak_memory() / gb, 2),
+             "cache_gb": round(mx.get_cache_memory() / gb, 2)}
+    try:
+        stats["budget_gb"] = round(mx.device_info()["max_recommended_working_set_size"] / gb, 2)
+    except Exception:
+        pass
+    if reset_peak:
+        mx.reset_peak_memory()
+    return stats
 
 
 class Engine:
@@ -105,23 +135,66 @@ class Engine:
         self.last_used = time.monotonic()
         self.load_seconds: float | None = None
         self.used = False  # ML libraries get imported on first load and stay in memory
+        self._closed = False
+        self.draining = False  # stopping: run what's queued, but don't swap models for it
+        self.memory: dict = {}  # GPU memory after the last job (peak = that job's peak)
 
     @property
     def loaded_model(self) -> str | None:
         return self._loaded.id if self._loaded else None
 
-    async def run(self, job: Job) -> list[JobResult]:
+    @property
+    def is_full(self) -> bool:
+        return self.pending >= self._max_pending
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def reserve(self) -> None:
+        """Take a queue slot now, synchronously, so a burst of submissions can't all pass a
+        capacity check and then fail later. Pass reserved=True to run() to use it."""
+        if self._closed:
+            raise EngineClosed("the image server is shutting down")
         if self.pending >= self._max_pending:
             raise EngineBusy(f"{self.pending} jobs already waiting")
         self.pending += 1
+
+    def release(self) -> None:
+        """Give back a slot taken with reserve() for a job that never reached run()."""
+        self.pending = max(0, self.pending - 1)
+
+    async def run(self, job: Job, *, reserved: bool = False) -> list[JobResult]:
+        if not reserved:
+            self.reserve()
         try:
-            async with self._turn:
+            if job.cancel.is_set():  # cancelled before it even queued
+                raise JobCancelled("client left while the job was queued")
+            job.waiting = True
+            try:
+                await self._turn.acquire()  # cancelling the task here is safe: asyncio.Lock passes the turn on
+            finally:
+                job.waiting = False
+            try:
                 if job.cancel.is_set():
                     raise JobCancelled("client left while the job was queued")
+                if self._closed or (self.draining and self.loaded_model not in (None, job.model.id)):
+                    raise EngineClosed("the image server is shutting down")
                 if self._before_job is not None:
                     await self._before_job()  # right before this job, not when it was queued
                 loop = asyncio.get_running_loop()
-                return await loop.run_in_executor(self._executor, self._run_sync, job)
+                future = loop.run_in_executor(self._executor, self._run_sync, job)
+                try:
+                    return await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    # The request went away (or shutdown cancelled it): stop the picture at its
+                    # next step, and keep the GPU turn until the MLX thread has really let go.
+                    job.cancel.set()
+                    with contextlib.suppress(BaseException):
+                        await future
+                    raise
+            finally:
+                self._turn.release()
         finally:
             self.pending -= 1
             self.last_used = time.monotonic()
@@ -145,6 +218,9 @@ class Engine:
         return self.used and self._loaded is None and self.pending == 0 and idle >= idle_seconds
 
     def shutdown(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self._executor.submit(self._unload_sync)
         self._executor.shutdown(wait=True)
 
@@ -153,13 +229,21 @@ class Engine:
     def _run_sync(self, job: Job) -> list[JobResult]:
         if job.cancel.is_set():
             raise JobCancelled("client left before the job started")
+        if job.on_start is not None:
+            job.on_start()
         backend = self._ensure_loaded(job.model)
+        mlx_memory_stats(reset_peak=True)  # so the next reading is this job's peak
         results = []
         try:
             for i in range(job.n):
                 if job.cancel.is_set():
                     raise JobCancelled("client left")
-                seed = job.seed + i
+                seed = (job.seed + i) % 2**32  # stays a seed the API accepts back
+
+                def step(done: int, total: int, i: int = i) -> None:
+                    if job.on_progress is not None and total:
+                        job.on_progress(min(1.0, (i + done / total) / job.n))
+
                 started = time.perf_counter()
                 image = backend.generate(
                     prompt=job.prompt,
@@ -170,6 +254,7 @@ class Engine:
                     guidance=job.guidance,
                     references=job.references,
                     should_stop=job.cancel.is_set,
+                    on_step=step,
                 )
                 results.append(JobResult(image, seed, time.perf_counter() - started))
         except (JobCancelled, ValueError):
@@ -183,6 +268,7 @@ class Engine:
             traceback.clear_frames(exc.__traceback__)
             self._unload_sync()
             raise
+        self.memory = mlx_memory_stats()
         gc.collect()
         self._release_memory()  # hand activation buffers back between jobs
         return results

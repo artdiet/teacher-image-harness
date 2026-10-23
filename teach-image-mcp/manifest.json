@@ -1,0 +1,119 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.3.schema.json",
+  "manifest_version": "0.3",
+  "name": "teach-image",
+  "display_name": "Teach Image",
+  "version": "2.0.1",
+  "description": "Make worksheet icons, coloring pages and storybook pictures on your own image server.",
+  "long_description": "Lets Claude (chat and Cowork) make and edit pictures with the teacher-image-harness image server running on a Mac on your network: no per-picture cost. Pictures are drawn on that Mac and saved as full-size PNGs on this computer; Claude sees a small preview and the prompt, which become part of your Claude conversation. Reference pictures keep characters the same from page to page.\n\nYou need the image server's address and a token for this computer. On the server Mac, run scripts/enable_lan.sh, then scripts/install_image_server.sh (it checks the network address), then scripts/client_tokens.sh add <this-computer's-name>. Here: enter the address and token, check that the extension is switched on, quit and reopen Claude, and allow Claude to use the tools when it asks (until then chats and tasks don't see them). See docs/MCP.md in the repository.",
+  "author": {
+    "name": "Art Dietrich",
+    "url": "https://github.com/artdiet"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/artdiet/teacher-image-harness"
+  },
+  "documentation": "https://github.com/artdiet/teacher-image-harness/blob/main/docs/MCP.md",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.mjs"
+      ],
+      "env": {
+        "IMAGE_SERVER_URL": "${user_config.server_url}",
+        "IMAGE_SERVER_TOKEN": "${user_config.api_token}",
+        "IMAGE_OUTPUT_DIR": "${user_config.output_dir}",
+        "UV_THREADPOOL_SIZE": "16"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "generate_image",
+      "description": "Make new pictures from a description"
+    },
+    {
+      "name": "edit_image",
+      "description": "Change a picture made earlier or a picture file on this computer"
+    },
+    {
+      "name": "get_image_job",
+      "description": "Collect a picture that took longer than one call"
+    },
+    {
+      "name": "cancel_image_job",
+      "description": "Stop a picture that is waiting or being drawn"
+    },
+    {
+      "name": "get_image",
+      "description": "Show a picture made earlier, with its prompt and seed"
+    },
+    {
+      "name": "list_recent_images",
+      "description": "List recent pictures"
+    },
+    {
+      "name": "list_references",
+      "description": "List saved reference pictures (characters, styles)"
+    },
+    {
+      "name": "save_reference",
+      "description": "Keep a picture as a reference for consistent characters"
+    },
+    {
+      "name": "delete_reference",
+      "description": "Delete a saved reference picture"
+    },
+    {
+      "name": "image_server_status",
+      "description": "Check the connection, models and queue"
+    }
+  ],
+  "keywords": [
+    "images",
+    "teacher",
+    "worksheets",
+    "coloring pages",
+    "storybook",
+    "local",
+    "privacy"
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "user_config": {
+    "server_url": {
+      "type": "string",
+      "title": "Image server address",
+      "description": "The Mac running the image server, e.g. http://192.168.1.20:7865 or http://teachers-mac.local:7865 (scripts/enable_lan.sh prints it). On that Mac itself, http://127.0.0.1:7865.",
+      "default": "http://127.0.0.1:7865",
+      "required": true
+    },
+    "api_token": {
+      "type": "string",
+      "title": "API token",
+      "description": "This computer's token. On the server Mac: scripts/client_tokens.sh add <name>.",
+      "sensitive": true,
+      "required": true
+    },
+    "output_dir": {
+      "type": "directory",
+      "title": "Save pictures in",
+      "description": "Folder for the full-size PNGs. Leave empty for \"Generated Images\" in your Claude folder (Documents/Claude or ~/Claude, which Cowork can use), or Pictures/Teach Image.",
+      "required": false
+    }
+  }
+}

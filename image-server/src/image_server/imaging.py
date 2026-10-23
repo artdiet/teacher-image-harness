@@ -17,6 +17,7 @@ MAX_SIDE = 2048
 REFERENCE_MAX_PIXELS = 1024 * 1024  # bigger references cost memory without helping
 INPUT_MAX_PIXELS = 50_000_000  # refuse to decode anything bigger (48 MP phone photos fit)
 INPUT_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP")
+HIGH_BIT_MODES = ("I;16", "I;16B", "I;16L", "I;16N", "I", "F")
 
 
 class ImageInputError(ValueError):
@@ -67,6 +68,10 @@ def load_reference_image(data: bytes) -> Image.Image:
             if pixels > INPUT_MAX_PIXELS:
                 raise ImageInputError("an uploaded picture has too many pixels")
             image = Image.open(io.BytesIO(data), formats=INPUT_FORMATS)
+            if image.format == "JPEG":
+                # libjpeg can decode at 1/2, 1/4 or 1/8 scale: a 48 MP phone photo becomes a
+                # few megapixels instead of ~150 MB of pixels (the result is ~1 MP anyway).
+                image.draft("RGB", (1024, 1024))
             image.load()
     except ImageInputError:
         raise
@@ -75,15 +80,16 @@ def load_reference_image(data: bytes) -> Image.Image:
     except (OSError, SyntaxError, ValueError) as exc:
         raise ImageInputError("an uploaded file is not a readable PNG, JPEG, WebP or GIF") from exc
 
+    image = _shrink_early(image)  # before the conversions and exif_transpose, which copy it all
+    if image.mode in HIGH_BIT_MODES:  # 16-bit / float grayscale
+        values = np.asarray(image, dtype=np.float32)
+        if image.mode.startswith("I;16") or values.max() > 255:
+            values = values * (255.0 / 65535.0)
+        image = _keep_info(Image.fromarray(np.clip(values, 0, 255).astype(np.uint8)), image)
     try:
         image = ImageOps.exif_transpose(image)
     except Exception:  # malformed EXIF (e.g. "not a TIFF file"): keep the stored orientation
         pass
-    if image.mode in ("I;16", "I;16B", "I;16L", "I;16N", "I", "F"):  # 16-bit / float grayscale
-        values = np.asarray(image, dtype=np.float32)
-        if image.mode.startswith("I;16") or values.max() > 255:
-            values = values * (255.0 / 65535.0)
-        image = Image.fromarray(np.clip(values, 0, 255).astype(np.uint8))
     if image.has_transparency_data:  # alpha channel or a tRNS colour key: flatten onto white
         rgba = image.convert("RGBA")
         white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
@@ -98,6 +104,28 @@ def load_reference_image(data: bytes) -> Image.Image:
         )
     if min(image.size) < SIZE_MULTIPLE:
         raise ImageInputError(f"each picture must be at least {SIZE_MULTIPLE} px on every side")
+    return image
+
+
+def _shrink_early(image: Image.Image) -> Image.Image:
+    """Cheaply cut a very large picture down (integer box reduction) before the colour
+    conversions below, which each copy the whole image: a 50 MP RGBA upload otherwise
+    peaks around 1 GB. Keeps at least twice the final pixel count for the LANCZOS resize."""
+    factor = int((image.width * image.height / (2 * REFERENCE_MAX_PIXELS)) ** 0.5)
+    if factor < 2:
+        return image
+    original = image
+    if image.mode in HIGH_BIT_MODES:  # keep the bit depth: converting first would clip it
+        size = (image.width // factor, image.height // factor)
+        return _keep_info(image.resize(size, Image.Resampling.BOX), original)
+    if image.mode not in ("RGB", "RGBA", "L"):
+        image = image.convert("RGBA" if image.has_transparency_data else "RGB")
+    return _keep_info(image.reduce(factor), original)
+
+
+def _keep_info(image: Image.Image, source: Image.Image) -> Image.Image:
+    """Carry the metadata (EXIF orientation) over to a converted copy."""
+    image.info = {**source.info, **image.info}
     return image
 
 

@@ -101,6 +101,66 @@ def test_reference_images_are_rgb_and_downscaled():
     assert flat.mode == "RGB" and flat.getpixel((0, 0)) == (255, 255, 255)
 
 
+def test_large_uploads_are_shrunk_before_conversion_and_keep_orientation():
+    # 25 MP RGBA with a transparent border: still flattened onto white after the early shrink.
+    image = Image.new("RGBA", (5000, 5000), (0, 0, 0, 0))
+    image.paste((20, 120, 200, 255), (1000, 1000, 4000, 4000))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    out = load_reference_image(buf.getvalue())
+    assert out.mode == "RGB" and out.width * out.height <= 1024 * 1024
+    assert out.getpixel((2, 2)) == (255, 255, 255) and out.getpixel((out.width // 2,) * 2) == (20, 120, 200)
+    # A big phone photo stored landscape with EXIF "rotate 90": comes out portrait.
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    for fmt in ("JPEG", "PNG"):
+        buf = io.BytesIO()
+        Image.new("RGB", (6000, 4500), (200, 30, 30)).save(buf, format=fmt, exif=exif.tobytes())
+        out = load_reference_image(buf.getvalue())
+        assert out.height > out.width, fmt
+
+
+def test_cancelled_request_stops_its_picture_and_keeps_the_gpu_turn_until_then():
+    """When a request task is cancelled mid-picture (client gone, server stopping), the
+    job must stop at its next step, and the next job must not start before it has."""
+    import threading
+    import time
+
+    from image_server.engine import JobCancelled
+
+    log = []
+
+    class Stoppable(FakeBackend):
+        def generate(self, **kwargs):
+            log.append(("start", kwargs["prompt"]))
+            if kwargs["prompt"] == "long":
+                while not kwargs["should_stop"]():
+                    time.sleep(0.01)
+                time.sleep(0.2)  # the last step finishes before the hook notices
+                log.append(("stopped", "long"))
+                raise JobCancelled("stopped")
+            return super().generate(**kwargs)
+
+    async def scenario():
+        engine = Engine(Stoppable, release_memory=lambda: None)
+        spec = MODELS["flux2-klein-4b"]
+        long_job = Job(model=spec, prompt="long", width=256, height=256, seed=1)
+        first = asyncio.create_task(engine.run(long_job))
+        while not log:
+            await asyncio.sleep(0.01)
+        second = asyncio.create_task(engine.run(Job(model=spec, prompt="next", width=256, height=256, seed=2)))
+        await asyncio.sleep(0.05)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert long_job.cancel.is_set()
+        await second
+        engine.shutdown()
+
+    asyncio.run(scenario())
+    assert log == [("start", "long"), ("stopped", "long"), ("start", "next")]
+
+
 def test_settings_validation():
     assert Settings(token="").validate()
     assert any("too short" in p for p in Settings(token="short").validate())

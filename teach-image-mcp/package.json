@@ -1,0 +1,23 @@
+{
+  "name": "teach-image-mcp",
+  "version": "2.0.1",
+  "description": "MCP proxy that lets Claude Desktop and Cowork use the teacher-image-harness image server on your network",
+  "type": "module",
+  "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "engines": {
+    "node": "^18.20.0 || >=20.10.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/proxy.test.js test/bundle.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2",
+    "esbuild": "0.28.2"
+  }
+}

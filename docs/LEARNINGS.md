@@ -259,7 +259,7 @@ API keys were off on the target instance, so `scripts/owui_install.py` runs
 |---|---|
 | Worksheet icon | `{subject}, flat vector icon, bold clean black outlines, simple shapes, solid bright colors, centered, plain white background, no text` |
 | Coloring page | `{subject}, coloring book page for kids, black and white line art, thick clean outlines, no shading, no gray, plain white background, no text` |
-| Storybook | `children's picture book illustration: {subject}, warm gentle colors, soft watercolor style` (style only if none named) |
+| Storybook | `children's picture book illustration: {subject}, warm gentle colors, soft watercolor style, no text` (style only if none named; without "no text", tall pages came back with made-up poster titles) |
 
 Keep words out of pictures and add them in the worksheet tool. An edit with
 the previous picture as reference ("same style, but a banana") keeps an icon
@@ -273,8 +273,8 @@ flood-filling the white background from the border; interior whites survive.
   installer validates `.env` with the server's own rules **before** stopping
   the running agent, waits for bootout, then health-polls.
 - `scripts/doctor.sh` checks:
-  - the agent, the loopback-only bind, and that Ollama is running but not
-    exposed
+  - the agent, the loopback-only bind (in LAN mode: that the LAN address
+    answers through the firewall), and that Ollama is running but not exposed
   - the Open WebUI container
   - the pipe's stored token against the server (from inside the container)
   - the director model being pulled
@@ -305,13 +305,184 @@ tests and manual runs didn't:
   - the status line left spinning after early exits
   - documentation that overstated security
 
-## 11. Recommendations for the book-building harness
+## 11. Claude Desktop and Cowork via MCP (2.0)
+
+Goal: let Claude chat and Cowork tasks use the Mac's image model, from this
+Mac or another computer on the home network.
+
+### Facts that decided the design (as of Oct 2026, Claude Desktop 2.42)
+
+| Fact | Consequence |
+|---|---|
+| Custom connectors (Settings > Connectors) and plugin `http`/`sse` MCP servers are connected from Anthropic's cloud, over HTTPS. | They can't reach a home LAN without a public tunnel, which would expose the server. Rejected. |
+| Cowork tasks run in Anthropic's cloud, but local stdio servers (desktop extensions, `claude_desktop_config.json`) run on the user's computer, and Cowork reaches them through the open Desktop app (`[localMcpBridge]` in `main.log`). | A small local MCP server on each computer, packaged as a `.mcpb` extension. Claude Desktop must stay open while a Cowork task uses it. |
+| Plugins can't carry secrets: `${VAR}` in a plugin's MCP config stays literal, and Cowork doesn't prompt for plugin settings. | The token goes in the extension's settings page (`sensitive`), not in a plugin. |
+| Local tool calls time out at about 60 s, and results over about 150k characters are rejected. `outputSchema`, `structuredContent` and embedded resources have open client bugs. | Calls wait up to 40 s, then hand back a job id. Previews share a ~75 KB budget. Results are plain text plus image blocks. |
+| The model may not see an image result until its next turn. | The text carries the saved path, `image_id`, seed and the exact prompt. |
+| Claude Desktop runs `.mcpb` Node servers on its bundled Node (v24 in 2.42). | One esbuild bundle (1.3 MB), nothing to install on clients, Windows included. |
+| macOS clients need Privacy & Security > Local Network permission for Claude. | It's the first troubleshooting step. |
+
+The design is a thin proxy and a fat server:
+
+- The GPU server stays the single queue (shared with Open WebUI) and owns the
+  previews; the extension has no native image libraries.
+- The extension is stateless apart from a short memory of where each job's
+  files go. It saves full PNGs on the client, never overwriting, and uploads
+  local files only when asked.
+
+### Measured through the extension (live server, FLUX.2 klein)
+
+| Call | Time | Result size |
+|---|---|---|
+| icon 1024², transparent, model cold | 12.1 s (9.3 s drawing) | 52k characters (38 KB preview) |
+| 4 coloring pages, 1024² | 41.2 s | 93k characters (4 previews, 15–18 KB each) |
+| edit of a local file (uploaded) | 23.2 s | 39k characters |
+| storybook 1152×896 with one reference | 19.0 s | 69k characters |
+| 2 storybook pages, 768×1344 | 20.3 s | 83k characters |
+
+Four storybook pages would pass 40 s, which is why the job-id path exists.
+The reference kept the owl's look (colors, scarf) in a new watercolor scene.
+
+### Lessons
+
+- **The macOS firewall misreports.** The uv-managed Python is ad-hoc signed.
+  - Until it is allowed, the firewall completes the TCP handshake and then
+    holds the connection, so clients time out without an error.
+  - `socketfilterfw --getappblocked` says "permitted" for programs it has never
+    prompted about.
+  - A request from the Mac to its own LAN IP goes through the firewall like a
+    remote one, so it's a reliable self-test (`scripts/check_lan.sh`). Apple's
+    `/usr/bin/python3`, which is on the allow list, answered on the same IP.
+  - The Mac resolves its own `<name>.local` to 127.0.0.1, so testing that name
+    on the Mac proves nothing.
+  - The approval is tied to the Python build: redo it after uv upgrades
+    Python.
+- **macOS `/bin/bash` 3.2** brace-expands JSON with commas inside
+  `"$( … -d "{…}" )"`, splitting it into separate words: the curl test's 422s
+  were the test's fault. Build JSON bodies in a variable first.
+- **"no text" belongs in the storybook template too.** Without it, a tall
+  storybook page came back with made-up poster lettering.
+- **LAN hardening in layers:**
+  - a `Host` allowlist (DNS rebinding)
+  - a private-client filter (RFC 1918, link-local, CGNAT, loopback)
+  - per-device token hashes, reloaded when the file changes and compared in
+    constant time across all of them
+  - opt-in binding to all interfaces, so the 1.0 setup stays loopback-only
+
+### First real use (Claude cloud session through the Desktop app)
+
+A Claude session in the cloud, linked to this Mac through the Desktop app,
+made a kindergarten counting set: 8 transparent icons in one folder, no
+errors. What it showed:
+
+- **Getting the tools to appear takes three things:**
+  - Settings filled in: an extension installed before its required token was
+    entered is not switched on ("missing required configuration, not enabling
+    automatically" in `main.log`).
+  - A full restart of Claude Desktop.
+  - The person choosing when Claude may use the tools, through a link Claude
+    shows. Until then the device bridge announced "an empty local-MCP group"
+    and the session saw no tools (`localMcpServers = []`). The extension only
+    started when that choice was made; the next request found its 10 tools, as
+    `mcp__remote-devices__Teach_Image__<tool>`.
+- **Parallel tool calls run one at a time.** Seven calls issued together
+  reached the server 12.5 s apart with nothing queued, so the bridge
+  serializes them; one GPU would anyway.
+- **Where the time goes, per icon:**
+  - 9.4 s of drawing (warm) on the server.
+  - 0.4–0.7 s from "finished on the server" to "saved on the Mac" (polling,
+    download, write).
+  - About 2.9 s from one call saving its file to the next job arriving: the
+    result going back to the cloud session and the next call coming in.
+
+  Faster polling would gain little; fewer, bigger calls would save the
+  bridge hops. The first, cold call took 17 s (model load).
+
+### What the 2.0 review found
+
+Four parallel reviewers (security, server concurrency, extension, docs)
+reproduced about 25 issues that tests and live runs had missed:
+
+- **Host names are case-insensitive, Starlette's check isn't.** macOS
+  LocalHostNames are mixed case, Node's fetch lowercases them, so every
+  `<name>.local` client got "Invalid host header". The check now lowercases
+  both sides.
+- **uvicorn has no header timeout.** Its only guard, the global
+  `limit_concurrency`, let any LAN device take the server offline by holding
+  16 idle sockets. Now a subclass of its h11 protocol caps connections per
+  client and closes connections that don't send headers within 10 s; it is
+  tested under a real uvicorn.
+- **Accepted jobs vanished on restart.** uvicorn waits for open connections,
+  not background tasks, so a reinstall, logout or even the idle restart (a job
+  arriving during the graceful shutdown) left job ids that answered 404. Now:
+  - records are written on accept
+  - shutdown gives running jobs 25 s to finish, then records the rest as
+    interrupted (launchd's `ExitTimeOut` is raised to 60 s)
+  - startup marks leftovers from a crash
+  - new jobs get a "restarting" 503 while draining
+- **Capacity checks must reserve.** Checking "queue full?" in the request
+  and counting the job later let a burst get `202` and fail afterwards.
+  Cancelling a queued job also waited behind the jobs ahead of it; a task
+  waiting on an `asyncio.Lock` can be cancelled safely, a running executor job
+  can't.
+- **Fail closed:** a damaged token file used to keep a revoked token valid.
+  Open WebUI's primary token is now accepted only from loopback (Docker's
+  `host.docker.internal` arrives as 127.0.0.1).
+- **Don't serve one front end's archive to another's token.** Archiving Open
+  WebUI's pictures in the job API's store let any device token read other
+  users' prompts; they went back to `outputs/<date>/`.
+- **Decode big uploads small.** JPEG `draft()` plus an early integer
+  `reduce()` (before colour conversion and EXIF rotation, which copy the whole
+  image) cut a 50 MP RGBA upload from about 1 GB to the size of one decoded
+  copy; two decodes at most run at once.
+- **Be exact about privacy.** "Nothing leaves your network" was wrong for the
+  Claude path: prompts and previews are part of the Claude conversation.
+- **The extension must never lose a job id:**
+  - one dropped poll used to fail the call after the job was accepted
+  - the ~60 s limit has to cover uploads and downloads, not just waiting
+  - a client timeout must not cancel a picture that is about to finish
+
+A second find-then-refute round on the fixes (one finder and one skeptic per
+area) confirmed 17 more, mostly about shutdown:
+
+- **uvicorn's graceful shutdown has no default limit.** On SIGTERM it closes
+  the listener first, then waits for every open request before the app's
+  shutdown runs. One client stalled mid-upload (a laptop going to sleep) kept a
+  stopping server alive forever, refusing everyone, and launchd's `KeepAlive`
+  never restarted it. Now the wait is bounded, and a regression test sends
+  SIGTERM to a real server process with a stalled client attached. The bound
+  must not be shorter than real work: a first 10 s limit cut off Open WebUI
+  pictures mid-drawing while background jobs got 25 s, so a stop now starts
+  one shared 25 s clock in uvicorn's `handle_exit`.
+- **A header deadline isn't enough.** Pipelining without reading, or a body
+  that stops, also pins a connection, so a watchdog now covers stalled bodies
+  (30 s) and stalled readers (60 s), and TCP keepalive notices vanished peers.
+  `transport.close()` waits to flush data a stalled client never reads; use
+  `abort()`. Judge a reader by whether the send buffer drains, not by
+  `pause_writing`: uvicorn hands an ordinary response to the socket in one
+  write and calls it complete at once.
+- **Cancelling a request mid-picture** used to release the GPU queue while the
+  MLX thread kept drawing. Now the job is stopped at its next step and keeps
+  its turn until then.
+- **Interrupted-job recovery needs an index:** a time window missed jobs after
+  a long power-off. Empty marker files per unfinished job make it exact and
+  cheap.
+- **Scripts:**
+  - The installer must wait out launchd's `ExitTimeOut`, or `bootstrap` fails
+    and the server stays down.
+  - A LAN self-test must tell "TCP connects but is held" (firewall) from
+    "nothing listening" (`curl -w %{time_connect}`).
+  - Take the interface from the default route, not just en0/en1 (USB and
+    Thunderbolt Ethernet).
+
+## 12. Recommendations for the book-building harness
 
 1. **Reuse the image server instead of rewriting it.** Extract `image-server/`
    as a package (pip-installable from git) or vendor it with attribution. Its
    OpenAI-style API, memory discipline, cancellation and security are already
-   paid for. Add:
-   - a job queue with **step progress** (mflux `call_in_loop`)
+   paid for. The 2.0 job API already has step progress (mflux
+   `call_in_loop`), cancellation, stored images with sidecars and references.
+   Still to add:
    - batch jobs
    - a model-per-pass scheduler
 2. **Plan memory by pass, not by request.** Run all LLM planning first (story,
@@ -346,8 +517,64 @@ tests and manual runs didn't:
    the same server.
 9. **Start on a current Open WebUI** (≥0.11.0, see the advisories in section 6)
    if it stays in the picture as a chat front end.
-10. **Open questions to re-check:**
+10. **Claude can already drive it:** the Teach Image extension (section 11)
+    gives Claude chat and Cowork the job API, so a Cowork task can plan a book
+    and call the tools page by page before any custom UI exists.
+11. **Open questions to re-check:**
    - Ollama re-adding image generation (MLX runner)
    - FLUX 3 klein memory on 24 GB
    - Z-Image-Edit release
    - running Open WebUI natively to drop Docker's VM (a few GB) from standby
+
+## 13. Hardware and hosting (as of Oct 2026)
+
+Researched 2026-10-18 for "what would I buy to run or share this?". Prices
+are US list prices and move fast (a 2026 memory shortage raised Mac, GPU, RAM
+and SSD prices and stretched delivery times); re-check before buying.
+
+**What decides speed on a Mac:** the GPU generation. M5/M6 GPUs have neural
+accelerators: Apple measured about 3.8× faster FLUX on an M5 than an M4, and
+an $899 M6 Mac mini drew a FLUX.1 image in 36 s against 94 s on an M4 (third
+party). MLX uses them only on macOS 26.2+. The pinned MLX needs macOS 14+.
+
+| Machine (Oct 2026) | US price | klein 4B per 1024² | Notes |
+|---|---|---|---|
+| Mac mini M5 Pro, 24 GB / 512 GB | $1,699 | ~9.5 s (same chip as this MacBook) | the known-good setup; 6 W idle |
+| Mac mini M5 Pro, 48 GB / 512 GB | ~$2,299 | ~9.5 s (~7.5–8 s with the 20-core GPU, +$200) | room for the director and image model together (estimate) |
+| Mac mini M6, 24 GB / 512 GB | $1,299 | ~13–22 s (estimate) | budget; 16 GB ($899) only for the image server alone |
+| Mac Studio M5 Max, 36 GB | $2,499 | ~5–6.5 s (estimate) | for several teachers on one machine |
+| PC + RTX 5060 Ti 16 GB | ~$1,750–2,500 (card ~$620–880) | ~5–6 s (estimate) | needs FP8 weights to keep everything on the GPU; ~40–80 W idle (estimate) |
+| PC + RTX 5070 Ti 16 GB | ~$2,100–2,800 | ~3 s (estimate) | |
+| DGX Spark / Strix Halo 128 GB | ~$3,400–7,000 | ~3–12 s (estimates) | only worth it for large LLMs; not for picture speed |
+
+Not worth buying for this: M4/M4 Pro Macs (no GPU neural accelerators), an
+RTX 5090 (about 2.5× its $1,999 list price, supply uncertain). Faster hardware
+has diminishing returns through Claude: each tool call spends about 2.9 s on
+the cloud-to-Mac link (section 11).
+
+**Licenses for sharing or a service** (from the model cards):
+
+- FLUX.2 klein 4B and Z-Image-Turbo: Apache-2.0, commercial use allowed.
+- FLUX.2 klein 9B and FLUX.2 dev: FLUX Non-Commercial. A salaried teacher's
+  classroom use is arguably "connected to ... employment responsibilities",
+  so keep them off.
+- Qwen-Image-2.1: research or evaluation only (a 2026 rollback from Apache).
+- FLUX 3 Image Klein (2026-10-15, mflux 0.23 runs it): free for people and
+  companies under $5M revenue generating their own outputs; hosting it for
+  others is unclear, so opt-in only.
+- Open WebUI keeps its branding clause above 50 users. Purely AI-generated
+  images are generally not copyrightable (US Copyright Office, 2025).
+
+**Hosted alternatives** (no GPU needed): klein 4B costs about $0.0012 per
+1024² picture on Cloudflare Workers AI (about 96 free per day), $0.005 on fal,
+$0.014 on BFL. A heavy classroom year of 10,000 pictures is roughly $12–140.
+An always-on cloud L4 ($320–580 a month) only beats those above roughly
+80,000–370,000 pictures a month. For a future paid service: start with a
+hosted API or a per-second serverless GPU running a diffusers port, not
+owned hardware.
+
+**Schools:** local generation keeps prompts and any student photos on the
+teacher's machine, which keeps FERPA/COPPA questions simple. With a cloud
+backend, keep student names and photos out of prompts. Districts usually
+approve tools rather than host AI servers (CoSN 2026: 86% vet tools, 7%
+prepare AI storage). Not legal advice.

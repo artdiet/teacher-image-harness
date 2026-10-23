@@ -15,7 +15,8 @@ def decode(item: dict) -> Image.Image:
 
 
 def test_health_needs_no_token(client):
-    assert client.get("/health").json() == {"status": "ok"}
+    body = client.get("/health").json()
+    assert body["status"] == "ok" and body["queue_depth"] == 0 and "version" in body
 
 
 def test_api_requires_token(client):
@@ -135,11 +136,15 @@ def test_edit_requires_token_before_reading_body(client):
 
 
 def test_outputs_are_archived_with_prompt(client, auth, settings):
-    client.post("/v1/images/generations", json={"prompt": "owl icon", "seed": 3}, headers=auth)
-    pngs = list((settings.data_dir / "outputs").rglob("*.png"))
-    records = list((settings.data_dir / "outputs").rglob("*.json"))
-    assert len(pngs) == 1 and len(records) == 1
-    assert json.loads(records[0].read_text())["prompt"] == "owl icon"
+    r = client.post("/v1/images/generations", json={"prompt": "owl icon", "seed": 3}, headers=auth)
+    assert "image_id" not in r.json()["data"][0]  # the 1.0 response shape
+    sidecars = list((settings.data_dir / "outputs").glob("*/*.json"))
+    assert len(sidecars) == 1 and sidecars[0].with_suffix(".png").is_file()
+    record = json.loads(sidecars[0].read_text())
+    assert record["prompt"] == "owl icon" and record["seed"] == 3
+    assert sidecars[0].stat().st_mode & 0o777 == 0o600
+    # Open WebUI's pictures stay out of the job API's store: device tokens can't list them.
+    assert client.get("/images", headers=auth).json()["images"] == []
 
 
 def test_research_models_hidden_unless_enabled(make_client, auth, settings):
